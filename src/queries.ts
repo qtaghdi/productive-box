@@ -7,10 +7,14 @@ export const userInfoQuery = `
   }
 `;
 
-export const createContributedRepoQuery = (username: string) => `
-  query {
-    user(login: "${username}") {
-      repositoriesContributedTo(last: 100, includeUserRepositories: true) {
+export const contributedRepoQuery = `
+  query ($username: String!, $after: String) {
+    user(login: $username) {
+      repositoriesContributedTo(first: 100, after: $after, includeUserRepositories: true) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           isFork
           name
@@ -23,16 +27,25 @@ export const createContributedRepoQuery = (username: string) => `
   }
 `;
 
-export const createCommittedDateQuery = (id: string, name: string, owner: string) => `
-  query {
-    repository(owner: "${owner}", name: "${name}") {
+export const committedDateQuery = `
+  query ($id: ID!, $name: String!, $owner: String!, $after: String) {
+    repository(owner: $owner, name: $name) {
       defaultBranchRef {
         target {
           ... on Commit {
-            history(first: 100, author: { id: "${id}" }) {
+            history(first: 100, after: $after, author: { id: $id }) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
               edges {
                 node {
                   committedDate
+                  associatedPullRequests(first: 1) {
+                    nodes {
+                      merged
+                    }
+                  }
                 }
               }
             }

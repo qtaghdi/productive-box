@@ -3,7 +3,7 @@ import { config } from 'dotenv';
 
 import generateBarChart from './generateBarChart.js';
 import githubQuery from './githubQuery.js';
-import { createCommittedDateQuery, createContributedRepoQuery, userInfoQuery } from './queries.js';
+import { committedDateQuery, contributedRepoQuery, userInfoQuery } from './queries.js';
 /**
  * get environment variable
  */
@@ -25,7 +25,27 @@ interface RepoInfo {
 interface Edge {
   node: {
     committedDate: string;
+    associatedPullRequests?: {
+      nodes?: Array<{
+        merged?: boolean;
+      }>;
+    };
   };
+}
+
+interface PageInfo {
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+interface RepoConnection {
+  nodes: RepoInfo[];
+  pageInfo: PageInfo;
+}
+
+interface CommitHistory {
+  edges: Edge[];
+  pageInfo: PageInfo;
 }
 
 (async () => {
@@ -40,58 +60,86 @@ interface Edge {
   /**
    * Second, get contributed repos
    */
-  const contributedRepoQuery = createContributedRepoQuery(username);
-  const repoResponse = await githubQuery(contributedRepoQuery).catch((error) =>
-    console.error(`Unable to get the contributed repo\n${error}`),
-  );
+  let repoAfter: string | null = null;
+  const repos: IRepo[] = [];
+  do {
+    const repoResponse: any = await githubQuery(contributedRepoQuery, {
+      username,
+      after: repoAfter,
+    }).catch((error) => console.error(`Unable to get the contributed repo\n${error}`));
 
-  /**
-   * If the token is invalid, stop the process
-   */
-  if (repoResponse.message === 'Bad credentials') {
-    console.error('Invalid GitHub token. Please renew the GH_TOKEN');
-    return;
-  }
+    if (!repoResponse) return;
 
-  const repos: IRepo[] = repoResponse?.data?.user?.repositoriesContributedTo?.nodes
-    .filter((repoInfo: RepoInfo) => !repoInfo?.isFork)
-    .map((repoInfo: RepoInfo) => ({
-      name: repoInfo?.name,
-      owner: repoInfo?.owner?.login,
-    }));
+    /**
+     * If the token is invalid, stop the process
+     */
+    if (repoResponse.message === 'Bad credentials') {
+      console.error('Invalid GitHub token. Please renew the GH_TOKEN');
+      return;
+    }
+
+    const repoConnection: RepoConnection | undefined = repoResponse?.data?.user?.repositoriesContributedTo;
+    if (!repoConnection) break;
+
+    const currentRepos =
+      repoConnection?.nodes
+        ?.filter((repoInfo: RepoInfo) => !repoInfo?.isFork)
+        .map((repoInfo: RepoInfo) => ({
+          name: repoInfo?.name,
+          owner: repoInfo?.owner?.login,
+        })) ?? [];
+
+    repos.push(...currentRepos);
+    repoAfter = repoConnection.pageInfo.hasNextPage ? repoConnection.pageInfo.endCursor : null;
+  } while (repoAfter);
 
   /**
    * Third, get commit time and parse into commit-time/hour diagram
    */
-  const committedTimeResponseMap = await Promise.all(
-    repos.map(({ name, owner }) => githubQuery(createCommittedDateQuery(id, name, owner))),
-  ).catch((error) => console.error(`Unable to get the commit info\n${error}`));
-
-  if (!committedTimeResponseMap) return;
-
   let morning = 0; // 6 - 12
   let daytime = 0; // 12 - 18
   let evening = 0; // 18 - 24
   let night = 0; // 0 - 6
 
-  committedTimeResponseMap.forEach((committedTimeResponse) => {
-    committedTimeResponse?.data?.repository?.defaultBranchRef?.target?.history?.edges.forEach((edge: Edge) => {
-      const committedDate = edge?.node?.committedDate;
-      const timeString = new Date(committedDate).toLocaleTimeString('en-US', {
-        hour12: false,
-        timeZone: process.env.TIMEZONE,
-      });
-      const hour = +timeString.split(':')[0];
+  for (const { name, owner } of repos) {
+    let commitAfter: string | null = null;
 
-      /**
-       * voting and counting
-       */
-      if (hour >= 6 && hour < 12) morning++;
-      if (hour >= 12 && hour < 18) daytime++;
-      if (hour >= 18 && hour < 24) evening++;
-      if (hour >= 0 && hour < 6) night++;
-    });
-  });
+    do {
+      const committedTimeResponse: any = await githubQuery(committedDateQuery, {
+        id,
+        name,
+        owner,
+        after: commitAfter,
+      }).catch((error) => console.error(`Unable to get the commit info for ${owner}/${name}\n${error}`));
+      if (!committedTimeResponse) break;
+
+      const history: CommitHistory | undefined =
+        committedTimeResponse?.data?.repository?.defaultBranchRef?.target?.history;
+      const edges: Edge[] = history?.edges ?? [];
+
+      edges.forEach((edge: Edge) => {
+        const isMergedCommit = edge?.node?.associatedPullRequests?.nodes?.some((pr) => pr?.merged) ?? false;
+        if (!isMergedCommit) return;
+
+        const committedDate = edge?.node?.committedDate;
+        const timeString = new Date(committedDate).toLocaleTimeString('en-US', {
+          hour12: false,
+          timeZone: process.env.TIMEZONE,
+        });
+        const hour = +timeString.split(':')[0];
+
+        /**
+         * voting and counting
+         */
+        if (hour >= 6 && hour < 12) morning++;
+        if (hour >= 12 && hour < 18) daytime++;
+        if (hour >= 18 && hour < 24) evening++;
+        if (hour >= 0 && hour < 6) night++;
+      });
+
+      commitAfter = history?.pageInfo?.hasNextPage ? history.pageInfo.endCursor : null;
+    } while (commitAfter);
+  }
 
   /**
    * Next, generate diagram
